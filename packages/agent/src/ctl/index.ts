@@ -1,0 +1,8 @@
+export { cmdInstall } from "./commands/install.js";
+export { cmdStatus } from "./commands/status.js";
+export { cmdEnable } from "./commands/enable.js";
+export { cmdDisable } from "./commands/disable.js";
+export { cmdChangeCode } from "./commands/change-code.js";
+export { cmdUninstall } from "./commands/uninstall.js";
+export { cmdListAdmins } from "./commands/list-admins.js";
+export { cmdBlockAdmin, cmdUnblockAdmin } from "./commands/block-admin.js";

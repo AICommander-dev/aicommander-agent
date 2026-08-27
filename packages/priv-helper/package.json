@@ -1,0 +1,34 @@
+{
+  "name": "@aicommander/priv-helper",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Per-machine privileged helper for AI Commander — a long-lived root (macOS LaunchDaemon) / LocalSystem (Windows Service) process that runs relay-signed elevated commands handed to it over local IPC by the per-user tray agent. The relay-signed capability is the authorization boundary; the local channel is hygiene only.",
+  "license": "Elastic-2.0",
+  "type": "module",
+  "bin": {
+    "aicommander-priv-helper": "./dist/bin/priv-helper.js"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "build:sea": "node scripts/build-sea.mjs",
+    "dev": "tsx bin/priv-helper.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@aicommander/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.21",
+    "esbuild": "0.28.2",
+    "postject": "^1.0.0-alpha.6",
+    "tsx": "^4.23.12",
+    "typescript": "5.9.3",
+    "vitest": "3.2.6"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
