@@ -1,0 +1,88 @@
+{
+  "name": "@aicommander/agent",
+  "version": "1.2.0",
+  "description": "Remote-machine agent for AI Commander — lets Claude, Codex and other AI agents run shell commands and detached long-running jobs, builds, batch work, and GPU/ML training on your server or laptop. No exposed SSH, open ports, or VPN.",
+  "keywords": [
+    "remote",
+    "remote-execution",
+    "remote-jobs",
+    "background-jobs",
+    "long-running-jobs",
+    "gpu-compute",
+    "ml-training",
+    "agent",
+    "devops",
+    "sysadmin",
+    "systemd",
+    "ai-agent",
+    "claude",
+    "aicommander",
+    "ssh-alternative"
+  ],
+  "homepage": "https://aicommander.dev",
+  "license": "Elastic-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AICommander-dev/aicommander-agent.git",
+    "directory": "packages/agent"
+  },
+  "bugs": {
+    "url": "https://github.com/AICommander-dev/aicommander/issues"
+  },
+  "type": "module",
+  "bin": {
+    "aicommander-agent": "./dist/bin/agent.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/index.js",
+    "dist/index.d.ts",
+    "dist/bin",
+    "dist/src/**/*.d.ts",
+    "dist-native/aicommander-win-exec-x64.exe",
+    "!dist/**/__tests__",
+    "!dist/**/*.test.*",
+    "!dist/**/*.map",
+    "README.md",
+    "LICENSE.txt",
+    "THIRD-PARTY-NOTICES.txt"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc && node scripts/build-npm.mjs",
+    "build:npm": "node scripts/build-npm.mjs",
+    "build:win-exec": "node scripts/build-win-exec.mjs",
+    "verify:win-exec": "node scripts/verify-win-exec.mjs",
+    "prepublishOnly": "tsc && node scripts/build-npm.mjs",
+    "compile": "pnpm run compile:linux-x64 && pnpm run compile:linux-arm64",
+    "compile:linux-x64": "bun build ./bin/agent.ts --compile --minify --target=bun-linux-x64-baseline --outfile dist-bin/aicommander-agent-linux-x64",
+    "compile:linux-arm64": "bun build ./bin/agent.ts --compile --minify --target=bun-linux-arm64 --outfile dist-bin/aicommander-agent-linux-arm64",
+    "dev": "tsx bin/agent.ts",
+    "typecheck": "tsc --noEmit",
+    "start": "AICOMMANDER_SERVER=https://aicommander.dev node dist/bin/agent.js",
+    "start:root": "sudo -E AICOMMANDER_SERVER=https://aicommander.dev node dist/bin/agent.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "chalk": "5.6.2",
+    "commander": "12.1.0",
+    "ora": "9.4.1",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@aicommander/priv-helper": "workspace:*",
+    "@aicommander/protocol": "workspace:*",
+    "@types/node": "22.19.21",
+    "@types/ws": "8.18.1",
+    "esbuild": "0.28.2",
+    "tsx": "^4.23.12",
+    "typescript": "5.9.3",
+    "vitest": "3.2.6"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
