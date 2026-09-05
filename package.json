@@ -1,0 +1,26 @@
+{
+  "name": "aicommander-agent-mirror",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "build": "pnpm --filter @aicommander/protocol build && pnpm --filter @aicommander/priv-helper build && pnpm --filter @aicommander/agent build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "3.2.6"
+  },
+  "pnpm": {
+    "overrides": {
+      "tar": "7.5.22",
+      "esbuild": "0.28.1",
+      "ws@>=8.0.0 <8.21.0": ">=8.21.0",
+      "undici@<7.29.0": ">=7.29.0 <8.0.0",
+      "nanoid@<3.3.18": ">=3.3.18 <4.0.0",
+      "@xmldom/xmldom@<0.8.15": ">=0.8.15 <0.9.0",
+      "fast-uri@<3.1.6": ">=3.1.6 <4.0.0",
+      "qs@<6.16.0": ">=6.16.0 <7.0.0"
+    }
+  }
+}
