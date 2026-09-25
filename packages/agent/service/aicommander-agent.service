@@ -1,0 +1,33 @@
+[Unit]
+Description=AI Commander Remote Agent
+Documentation=https://aicommander.dev/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# Holds the worker heartbeat file (/run/aicommander-agent/heartbeat) that the
+# in-process supervisor watches to detect a wedged event loop, plus state.json
+# which carries the live session code (a root-exec credential).
+RuntimeDirectory=aicommander-agent
+# 0700: owner-only so local unprivileged users can't traverse the dir and read
+# the session code from state.json.
+RuntimeDirectoryMode=0700
+Environment=AICOMMANDER_SERVER=https://aicommander.dev
+Environment=AICOMMANDER_SERVICE=1
+Environment=NODE_ENV=production
+# ExecStart launches the SUPERVISOR, which spawns the real agent as a worker and
+# force-restarts it on a stalled heartbeat. Restart=always here covers the rare
+# case where the supervisor itself dies.
+ExecStart=/usr/local/bin/aicommander-agent
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aicommander-agent
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,148 @@
+name: Publish @aicommander/agent
+
+# Dispatched by the private monorepo's release workflow AFTER it has pushed this
+# repository's snapshot and tag (see `sync-agent-mirror` in that repo's
+# .github/workflows/release.yml). Nothing here is a source of truth: the tree,
+# the tag, and the signed Windows launcher all arrive from that push.
+#
+# This repository holds NO secrets. Publishing is tokenless OIDC trusted
+# publishing, and provenance attestations are minted by GitHub for THIS repo —
+# which is the whole reason the publish moved here: an attestation can only name
+# the public repository the workflow physically runs in, and
+# `repository.url` in packages/agent/package.json must match it case-sensitively.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish; must match the tag this run is dispatched on and packages/agent/package.json
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      # OIDC trusted publishing requires npm >= 11.5.1; Node 22 bundles npm 10.
+      - run: npm install --global npm@^11.5.1
+
+      # Fail CLOSED before anything is built. A dispatch that names a version
+      # other than the one this ref actually carries would publish the wrong
+      # tree under the right number, and the provenance attestation would
+      # faithfully certify that mistake.
+      - name: Verify tag, input and manifest agree on the version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::publish must be dispatched on a release tag, got $REF_TYPE $REF_NAME"
+            exit 1
+          fi
+          MANIFEST_VERSION=$(node -p "require('./packages/agent/package.json').version")
+          if [ "$REF_NAME" != "v${INPUT_VERSION}" ]; then
+            echo "::error::tag $REF_NAME does not match dispatched version $INPUT_VERSION"
+            exit 1
+          fi
+          if [ "$MANIFEST_VERSION" != "$INPUT_VERSION" ]; then
+            echo "::error::packages/agent/package.json is $MANIFEST_VERSION, dispatched version is $INPUT_VERSION"
+            exit 1
+          fi
+
+      # Provenance names this repository, so `repository.url` has to be this
+      # repository — case-sensitively. npm rejects the publish otherwise, but it
+      # does so after the build; check it up front where the message is readable.
+      - name: Verify repository field matches this repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED="git+https://github.com/${GITHUB_REPOSITORY}.git"
+          ACTUAL=$(node -p "require('./packages/agent/package.json').repository.url")
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::packages/agent/package.json repository.url is $ACTUAL, expected $EXPECTED"
+            exit 1
+          fi
+
+      # The relicense boundary is a version number (1.0.56 and earlier MIT, 1.1.0
+      # and later Elastic-2.0), stated in every README beside this manifest.
+      # Nothing but this check ties the `license` FIELD to it, and a development
+      # tree carries the post-boundary license with a pre-boundary version by
+      # construction — the release script bumps the number. Refuse to publish a
+      # tarball whose manifest would contradict its own README.
+      - name: Verify the license field matches the relicense boundary
+        shell: bash
+        run: node packages/agent/scripts/license-boundary.mjs --check
+
+      - run: pnpm install --frozen-lockfile
+      # Preserve protocol -> priv-helper order: the agent's prepublishOnly build
+      # resolves both from their generated dist/.
+      - run: pnpm --filter @aicommander/protocol build
+      - run: pnpm --filter @aicommander/priv-helper build
+
+      # The launcher is built and signed in the private repo and travels here as
+      # a committed artifact. This repository holds no key, so it cannot re-sign
+      # it — it verifies it instead, in public, where the check is auditable by
+      # anyone reading the run log.
+      #
+      # The `.sha256` proves only that the file and its checksum arrived
+      # together; both are committed here, so on its own it is self-referential.
+      # The origin proof is the detached Ed25519 signature, checked against the
+      # release key pinned in packages/agent/scripts/release-key.mjs and
+      # published at https://aicommander.dev/install.pub — the same key that
+      # signs the agent binaries and the install script. Nothing in this
+      # repository can produce that signature; it can only reject one.
+      # `--require-authenticode` additionally refuses a launcher that carries no
+      # Authenticode certificate table (Windows validates that signature itself
+      # at load time; this check is structural).
+      - name: Verify signed Windows launcher npm input
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/agent/dist-native
+          sha256sum -c aicommander-win-exec-x64.exe.sha256
+          cd ../../..
+          node packages/agent/scripts/verify-win-exec.mjs \
+            --require-authenticode --require-signature \
+            packages/agent/dist-native/aicommander-win-exec-x64.exe
+      - name: Verify npm tarball contains the signed Windows launcher
+        working-directory: packages/agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > npm-pack-dry-run.json
+          node -e 'const p=require("./npm-pack-dry-run.json")[0]; if(!p.files.some(f=>f.path==="dist-native/aicommander-win-exec-x64.exe")) throw new Error("Windows launcher missing from npm tarball")'
+      - name: Verify npm tarball carries the license
+        working-directory: packages/agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e 'const p=require("./npm-pack-dry-run.json")[0]; if(!p.files.some(f=>f.path==="LICENSE.txt")) throw new Error("LICENSE.txt missing from npm tarball")'
+      # esbuild inlines the MIT-licensed @aicommander/protocol sources into the
+      # published bundles, and MIT requires its notice to travel with copies of
+      # the code. The tarball is such a copy.
+      - name: Verify npm tarball carries the third-party notices
+        working-directory: packages/agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e 'const p=require("./npm-pack-dry-run.json")[0]; if(!p.files.some(f=>f.path==="THIRD-PARTY-NOTICES.txt")) throw new Error("THIRD-PARTY-NOTICES.txt missing from npm tarball")'
+
+      - name: Publish @aicommander/agent (OIDC trusted publishing, with provenance)
+        run: npm publish --access public --provenance
+        working-directory: packages/agent
