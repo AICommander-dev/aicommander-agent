@@ -1,0 +1,485 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Colors ──────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; BOLD='\033[1m'; RESET='\033[0m'
+
+info()    { echo -e "${BLUE}→${RESET} $*"; }
+success() { echo -e "${GREEN}✓${RESET} $*"; }
+warn()    { echo -e "${YELLOW}⚠${RESET} $*"; }
+error()   { echo -e "${RED}✗${RESET} $*" >&2; exit 1; }
+header()  { echo -e "\n${BOLD}$*${RESET}"; }
+
+contains_control_character() {
+  local value="$1" i char code
+  local LC_ALL=C
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    printf -v code '%d' "'$char"
+    # Includes NUL (0), although POSIX environment strings and Bash variables
+    # cannot carry an embedded NUL across the process boundary.
+    if ((code <= 31 || code == 127)); then
+      return 0
+    fi
+  done
+  return 1
+}
+
+contains_invalid_uri_character() {
+  local value="$1" i char
+  local LC_ALL=C
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      [A-Za-z0-9]|"-"|"."|"_"|"~"|":"|"/"|"?"|"#"|"["|"]"|"@"|"!"|\
+        '$'|"&"|"'"|"("|")"|"*"|"+"|","|";"|"="|"%") ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+is_loopback_host() {
+  local host="$1"
+  [[ "$host" =~ ^[Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]$ \
+    || "$host" == "127.0.0.1" \
+    || "$host" == "[::1]" ]]
+}
+
+validate_server_url() {
+  local raw="$1" scheme remainder authority host port="" percent_tail label
+  local -a labels
+
+  # Run before the value is printed, passed to curl, or rendered into systemd.
+  if contains_control_character "$raw"; then
+    error "Invalid AICOMMANDER_SERVER: control characters are not allowed."
+  fi
+  if contains_invalid_uri_character "$raw"; then
+    error "Invalid AICOMMANDER_SERVER: use a valid percent-encoded URL."
+  fi
+
+  case "$raw" in
+    https://*) scheme="https" ;;
+    http://*)  scheme="http" ;;
+    *) error "Invalid AICOMMANDER_SERVER: URL must use https:// (or http:// for loopback development)." ;;
+  esac
+
+  remainder="${raw#*://}"
+  authority="${remainder%%[/?#]*}"
+  if [[ -z "$authority" || "$authority" == *"@"* ]]; then
+    error "Invalid AICOMMANDER_SERVER: URL must contain a host and no userinfo."
+  fi
+
+  if [[ "$authority" == \[* ]]; then
+    # The existing relay trust model only grants plaintext IPv6 access to the
+    # exact loopback address. Keep the shell parser deliberately narrow.
+    if [[ "$authority" =~ ^(\[::1\])(:([0-9]{1,5}))?$ ]]; then
+      host="${BASH_REMATCH[1]}"
+      port="${BASH_REMATCH[3]:-}"
+    else
+      error "Invalid AICOMMANDER_SERVER: unsupported IPv6 host."
+    fi
+  else
+    if [[ "$authority" == *:* ]]; then
+      host="${authority%:*}"
+      port="${authority##*:}"
+      if [[ "$host" == *:* || ! "$port" =~ ^[0-9]{1,5}$ ]]; then
+        error "Invalid AICOMMANDER_SERVER: invalid port."
+      fi
+    else
+      host="$authority"
+    fi
+
+    if [[ ${#host} -gt 253 || ! "$host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$ ]] \
+      && [[ ! "$host" =~ ^[A-Za-z0-9]$ ]]; then
+      error "Invalid AICOMMANDER_SERVER: invalid host."
+    fi
+    IFS='.' read -r -a labels <<< "$host"
+    for label in "${labels[@]}"; do
+      if [[ ${#label} -gt 63 || ! "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
+        error "Invalid AICOMMANDER_SERVER: invalid host."
+      fi
+    done
+  fi
+
+  if [[ -n "$port" ]] && ((10#$port < 1 || 10#$port > 65535)); then
+    error "Invalid AICOMMANDER_SERVER: port must be between 1 and 65535."
+  fi
+
+  # A literal '%' in a URL must begin a valid percent-encoded octet.
+  percent_tail="$raw"
+  while [[ "$percent_tail" == *"%"* ]]; do
+    percent_tail="${percent_tail#*%}"
+    if [[ ! "$percent_tail" =~ ^[0-9A-Fa-f]{2} ]]; then
+      error "Invalid AICOMMANDER_SERVER: malformed percent encoding."
+    fi
+  done
+
+  if [[ "$scheme" == "http" ]] && ! is_loopback_host "$host"; then
+    error "Invalid AICOMMANDER_SERVER: plaintext HTTP is allowed only for an explicit loopback development relay."
+  fi
+}
+
+systemd_environment_line() {
+  local value="$1"
+  # systemd expands '%' specifiers in unit values. Double them only in the unit;
+  # AICOMMANDER_SERVER itself remains unchanged for curl.
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  printf 'Environment="AICOMMANDER_SERVER=%s"' "$value"
+}
+
+# ── Config ───────────────────────────────────────────────────────────────────
+AICOMMANDER_SERVER="${AICOMMANDER_SERVER:-https://aicommander.dev}"
+validate_server_url "$AICOMMANDER_SERVER"
+SYSTEMD_ENVIRONMENT="$(systemd_environment_line "$AICOMMANDER_SERVER")"
+# Release CI replaces this sentinel in the signed, immutable installer artifact.
+# The mutable /install template is deliberately not executable; operators must
+# download and verify the versioned release artifact before running it.
+INSTALLER_RELEASE_VERSION="1.0.41"
+SERVICE_NAME="aicommander-agent"
+SYSTEMD_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+STATE_FILE="/var/run/aicommander-agent/state.json"
+
+# ── 1. Root check ────────────────────────────────────────────────────────────
+# Refuse the historical `curl .../install | sudo bash` shape. A remote script
+# must be saved and signature-verified as an unprivileged user before sudo sees
+# any of its bytes. This guard prevents accidental use; it is not itself a trust
+# boundary because a compromised mutable /install response could remove it.
+if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]}" ]]; then
+  error "Refusing to run an installer from standard input. Verify the signed installer first: ${AICOMMANDER_SERVER}/howto/#install-agent"
+fi
+if [[ $EUID -ne 0 ]]; then
+  error "This verified installer must be run as root: sudo bash /path/to/verified-install"
+fi
+
+header "AI Commander Agent Installer"
+echo "  Remote access service for AI-powered machine management"
+echo "  Server: ${AICOMMANDER_SERVER}"
+echo ""
+
+# ── 2. Linux-only guard ──────────────────────────────────────────────────────
+OS="$(uname -s)"
+if [[ "$OS" != "Linux" ]]; then
+  error "This installer supports Linux only. Detected: $OS"
+fi
+
+# ── 2b. QNAP QTS / QuTS hero guard ───────────────────────────────────────────
+# QTS reports itself as Linux but is not a usable one for this installer: /tmp is
+# a 64 MB tmpfs and /usr/local/bin sits on a ramdisk rebuilt at every boot, so the
+# ~95 MB download below dies as the misleading `curl: (23) Failure writing output
+# to destination` — and a run that did succeed would vanish on the next restart,
+# with no systemd to run the unit written in step 6. Fail here, with a pointer,
+# instead of halfway through. Both markers are QNAP-only: /sbin/getcfg is QNAP's
+# config reader and /etc/config is its durable configuration volume.
+if [[ -x /sbin/getcfg && ( -f /etc/config/uLinux.conf || -f /etc/config/qpkg.conf ) ]]; then
+  error "QNAP QTS / QuTS hero detected — this installer cannot work here (64 MB /tmp, ramdisk /usr/local, no systemd).
+    Follow the QNAP procedure instead: ${AICOMMANDER_SERVER}/skill/qnap/SKILL.md"
+fi
+
+# ── 3. Detect CPU architecture ───────────────────────────────────────────────
+ARCH_RAW="$(uname -m)"
+case "$ARCH_RAW" in
+  x86_64|amd64)  ARCH="linux-x64"   ;;
+  aarch64|arm64) ARCH="linux-arm64" ;;
+  *) error "Unsupported architecture: ${ARCH_RAW}. Supported: x86_64, aarch64." ;;
+esac
+info "Detected architecture: ${ARCH_RAW} (${ARCH})"
+
+# ── 4. Download + verify the standalone agent binary ─────────────────────────
+# The agent ships as a single self-contained native binary (agent + service
+# controller in one) served from the relay's /dist endpoint. No Node, no npm.
+#
+# Because this binary runs as ROOT, we verify it before installing — both checks
+# are enforced and a failure aborts the install:
+#   - SHA-256 checksum (integrity — catches corruption / partial download)
+#   - Ed25519 signature (authenticity — rejects a tampered binary from a
+#     compromised mirror/CDN), verified against the public key pinned below.
+BINARY_PATH="/usr/local/bin/aicommander-agent"
+CTL_SYMLINK="/usr/local/bin/aicommander-ctl"
+
+# A release-signed installer embeds its exact release version. The mutable
+# /install template retains the sentinel and must never install anything, even
+# if it was first saved to disk. All binary/checksum/signature requests from a
+# valid release artifact therefore target exactly its own release.
+[[ "$INSTALLER_RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || error "This mutable installer template is not executable. Download and verify a signed versioned installer first."
+PINNED_VERSION="$INSTALLER_RELEASE_VERSION"
+AGENT_URL="${AICOMMANDER_SERVER}/dist/v/${PINNED_VERSION}/agent-${ARCH}"
+
+# Pinned Ed25519 public key (PEM) the agent binary is verified against. The
+# release workflow signs each agent binary before uploading its detached .sig
+# artifact; the relay only serves that precomputed signature.
+AGENT_PUBKEY_PEM="-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAcqNx01NvglpKTsF60Yij5LuoIHgXJ/SUoQysfU2eyRw=
+-----END PUBLIC KEY-----"
+
+sha256_of() {
+  if command -v sha256sum &>/dev/null; then sha256sum "$1" | awk '{print $1}';
+  elif command -v shasum &>/dev/null; then shasum -a 256 "$1" | awk '{print $1}';
+  else return 2; fi
+}
+
+verify_checksum() {
+  local bin="$1" expected actual
+  expected="$(curl -fsSL "${AGENT_URL}.sha256" 2>/dev/null | awk '{print $1}')" || return 1
+  [[ -n "$expected" ]] || return 1
+  actual="$(sha256_of "$bin")" || return 2
+  [[ "$expected" == "$actual" ]]
+}
+
+# True when the available openssl CANNOT do Ed25519 detached verification.
+# Every such result is fatal; distinguishing LibreSSL / missing -rawin only
+# makes the operator-facing failure actionable.
+openssl_cannot_ed25519() {
+  case "$(openssl version 2>/dev/null)" in
+    *LibreSSL*) return 0 ;;
+  esac
+  [[ "$(openssl pkeyutl -help 2>&1)" == *"-rawin"* ]] || return 0
+  return 1
+}
+
+# Returns: 0 verified, 1 invalid signature, 2 no openssl, 3 no pinned key,
+# 4 unsupported Ed25519 tooling, 5 missing/empty detached signature.
+verify_signature() {
+  local bin="$1" sig pub rc
+  [[ -n "$AGENT_PUBKEY_PEM" ]] || return 3
+  command -v openssl &>/dev/null || return 2
+  openssl_cannot_ed25519 && return 4
+  sig="$(mktemp)"; pub="$(mktemp)"
+  printf '%s\n' "$AGENT_PUBKEY_PEM" > "$pub"
+  if ! curl -fsSL "${AGENT_URL}.sig" -o "$sig" || [[ ! -s "$sig" ]]; then
+    rm -f "$sig" "$pub"
+    return 5
+  fi
+  if openssl pkeyutl -verify -pubin -inkey "$pub" -rawin -in "$bin" -sigfile "$sig" &>/dev/null; then
+    rc=0
+  else
+    rc=$?
+  fi
+  rm -f "$sig" "$pub"
+  return $rc
+}
+
+info "Downloading agent from ${AGENT_URL}..."
+TMP_BIN="$(mktemp)"
+if ! curl -fsSL "$AGENT_URL" -o "$TMP_BIN"; then
+  rm -f "$TMP_BIN"
+  error "Failed to download agent binary from ${AGENT_URL}"
+fi
+if [[ ! -s "$TMP_BIN" ]]; then
+  rm -f "$TMP_BIN"
+  error "Downloaded agent binary is empty — aborting."
+fi
+
+# Checksum (always enforced).
+if verify_checksum "$TMP_BIN"; then
+  success "Checksum verified"
+else
+  rc=$?
+  rm -f "$TMP_BIN"
+  [[ $rc -eq 2 ]] && error "No sha256 tool (sha256sum/shasum) available to verify the download."
+  error "Checksum verification FAILED — refusing to install a possibly-tampered binary."
+fi
+
+# Signature (always enforced; there is no checksum-only mode).
+if verify_signature "$TMP_BIN"; then
+  success "Signature verified"
+else
+  rc=$?
+  rm -f "$TMP_BIN"
+  case $rc in
+    2) error "OpenSSL 3.x is required to verify the binary signature but was not found." ;;
+    3) error "No agent signing public key is configured — refusing to install." ;;
+    4) error "Installed openssl cannot verify Ed25519 signatures (LibreSSL or missing pkeyutl -rawin) — refusing to install. Install OpenSSL 3.x." ;;
+    5) error "Detached agent signature is missing or empty — refusing to install." ;;
+    *) error "Signature verification FAILED — refusing to install. The binary may be tampered." ;;
+  esac
+fi
+
+install -m 0755 "$TMP_BIN" "$BINARY_PATH"
+rm -f "$TMP_BIN"
+ln -sf "$BINARY_PATH" "$CTL_SYMLINK"
+success "Installed ${BINARY_PATH} (and ${CTL_SYMLINK})"
+
+# ── 5. Ensure durable device-identity dir exists ─────────────────────────────
+# The agent persists a stable device identity in /etc/aicommander-agent/device.json
+# (survives reboots, unlike /var/run). The binary creates the file on first run;
+# pre-creating the dir as root with tight perms is safe and avoids races.
+DEVICE_DIR="/etc/aicommander-agent"
+mkdir -p "$DEVICE_DIR"
+chmod 700 "$DEVICE_DIR"
+success "Device identity dir ready (${DEVICE_DIR})"
+
+# ── 5b. Ensure the secure-exec sandbox user exists ───────────────────────────
+# `secure exec` (the service-token path) drops to this dedicated NON-ROOT account
+# before running a command — it is the real containment boundary. A system user
+# with no login shell and its own home (so an operator can provision per-tool
+# config like ~/.claude under it). Idempotent and non-fatal: secure exec is
+# opt-in, so a failure here must not abort the base install — the secure path
+# just fails closed at call time until the user exists.
+SECURE_EXEC_USER="aicommander-exec"
+if getent passwd "$SECURE_EXEC_USER" >/dev/null 2>&1; then
+  success "Sandbox user \"${SECURE_EXEC_USER}\" already exists"
+  warn "Existing sandbox-user permissions/groups were preserved; secure exec will refuse to run if its runtime group check is unsafe or inconclusive"
+else
+  NOLOGIN="$(command -v nologin || echo /usr/sbin/nologin)"
+  [[ -x "$NOLOGIN" ]] || NOLOGIN="/bin/false"
+  # No -G/--groups: a new account receives no supplementary memberships.
+  if useradd --system --create-home --shell "$NOLOGIN" "$SECURE_EXEC_USER" >/dev/null 2>&1; then
+    SECURE_EXEC_ENTRY="$(getent passwd "$SECURE_EXEC_USER" 2>/dev/null || true)"
+    IFS=: read -r _ _ _ _ _ SECURE_EXEC_HOME _ <<< "$SECURE_EXEC_ENTRY"
+    if [[ -n "$SECURE_EXEC_HOME" && -d "$SECURE_EXEC_HOME" ]] && chmod 700 "$SECURE_EXEC_HOME"; then
+      success "Sandbox user \"${SECURE_EXEC_USER}\" created (home mode 0700, no supplementary groups)"
+    else
+      warn "Sandbox user created, but its home could not be secured to 0700"
+    fi
+  else
+    warn "Could not create sandbox user \"${SECURE_EXEC_USER}\" — secure exec will be unavailable until it exists"
+  fi
+fi
+
+# ── 6. Write systemd service file ────────────────────────────────────────────
+info "Writing systemd service to ${SYSTEMD_PATH}..."
+
+cat > "$SYSTEMD_PATH" << SERVICEEOF
+[Unit]
+Description=AI Commander Remote Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+RuntimeDirectory=aicommander-agent
+# 0700: the runtime dir holds state.json with the live session code (a root-exec
+# credential); owner-only blocks local unprivileged users from reading it.
+RuntimeDirectoryMode=0700
+${SYSTEMD_ENVIRONMENT}
+Environment=AICOMMANDER_SERVICE=1
+Environment=NODE_ENV=production
+ExecStart=${BINARY_PATH}
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aicommander-agent
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+
+success "Service file written"
+
+# ── 7. Enable on boot, then (re)start to load the new binary ─────────────────
+# Use `restart`, NOT `start`: on a fresh install it behaves like start; on an
+# UPDATE it forces systemd to stop the old running process and exec the freshly
+# installed binary. Plain `start` (incl. `enable --now`) is a no-op while the
+# unit is already active, which would leave the OLD agent process running after
+# an update — and a hung old process keeps blocking the agent's command channel.
+info "Restarting service..."
+systemctl daemon-reload
+systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
+
+if ! systemctl restart "$SERVICE_NAME"; then
+  warn "Graceful restart failed — forcing stop then start..."
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  systemctl kill --signal=SIGKILL "$SERVICE_NAME" 2>/dev/null || true
+  systemctl start "$SERVICE_NAME" \
+    || error "Could not start ${SERVICE_NAME}. Inspect: journalctl -u ${SERVICE_NAME} -n 50"
+fi
+
+# Verify the unit actually came up — never report success on a dead/hung unit.
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+  success "Service running (PID $(systemctl show -p MainPID --value "$SERVICE_NAME"))"
+else
+  error "Service is not active after restart. Inspect: journalctl -u ${SERVICE_NAME} -n 50"
+fi
+
+# ── 8. Wait for session code (max 15 s, polling every 500 ms) ────────────────
+info "Waiting for session code..."
+SESSION_CODE=""
+MAX_ATTEMPTS=30   # 30 × 0.5 s = 15 s
+
+extract_code() {
+  local file="$1"
+  # Try python3 first, then python, then jq, then raw grep
+  local code=""
+  if command -v python3 &>/dev/null 2>&1; then
+    code="$(python3 -c "import json; d=json.load(open('$file')); print(d.get('sessionCode',''))" 2>/dev/null || true)"
+  fi
+  if [[ -z "$code" ]] && command -v python &>/dev/null 2>&1; then
+    code="$(python -c "import json; d=json.load(open('$file')); print(d.get('sessionCode',''))" 2>/dev/null || true)"
+  fi
+  if [[ -z "$code" ]] && command -v jq &>/dev/null 2>&1; then
+    code="$(jq -r '.sessionCode // empty' "$file" 2>/dev/null || true)"
+  fi
+  if [[ -z "$code" ]]; then
+    # Raw grep fallback: "sessionCode": "ABC-123"
+    code="$(grep -oP '"sessionCode"\s*:\s*"\K[^"]+' "$file" 2>/dev/null || true)"
+  fi
+  echo "$code"
+}
+
+for _i in $(seq 1 "$MAX_ATTEMPTS"); do
+  if [[ -f "$STATE_FILE" ]]; then
+    SESSION_CODE="$(extract_code "$STATE_FILE")"
+    if [[ -n "$SESSION_CODE" ]]; then
+      break
+    fi
+  fi
+  sleep 0.5
+done
+
+# ── 9. Final output ──────────────────────────────────────────────────────────
+echo ""
+
+if [[ -n "$SESSION_CODE" ]]; then
+  # Mask the code in on-screen output — it is a root-exec credential and should
+  # not be captured in screenshots / screen-shares / scrollback. Reveal only the
+  # AIC- prefix + first group; the operator pulls the full value on demand.
+  MASKED="$(echo "$SESSION_CODE" | cut -d- -f1-2)-***-***"
+
+  # Pad the code line so the box is always 36 chars wide
+  CODE_LINE="  Session code: ${MASKED}"
+  PAD=$(( 34 - ${#CODE_LINE} ))
+  [[ $PAD -lt 0 ]] && PAD=0
+  PADDING="$(printf '%*s' "$PAD" '')"
+
+  echo -e "${GREEN}${BOLD}╔══════════════════════════════════════╗${RESET}"
+  echo -e "${GREEN}${BOLD}║  AI Commander Ready!                 ║${RESET}"
+  echo -e "${GREEN}${BOLD}╠══════════════════════════════════════╣${RESET}"
+  echo -e "${GREEN}${BOLD}║${RESET}  Session code: ${BOLD}${MASKED}${RESET}${PADDING}${GREEN}${BOLD}  ║${RESET}"
+  echo -e "${GREEN}${BOLD}╚══════════════════════════════════════╝${RESET}"
+  echo ""
+  echo "  Reveal full code:         sudo aicommander-agent status --reveal"
+  echo "  Then use it in Claude:    'execute df -h on <code>'"
+  echo "  Service logs:             journalctl -u ${SERVICE_NAME} -f"
+  echo "  Manage:                   sudo aicommander-agent status"
+  echo "  Uninstall:                sudo aicommander-agent uninstall --force"
+  echo ""
+  echo -e "${YELLOW}${BOLD}  ⚠ Keep this code secret.${RESET} Anyone who has it can run commands as"
+  echo    "    root on this machine. Don't paste it into shared chats, screenshots,"
+  echo    "    or tickets. If it leaks, run: sudo aicommander-agent change-code"
+else
+  echo -e "${YELLOW}${BOLD}╔══════════════════════════════════════╗${RESET}"
+  echo -e "${YELLOW}${BOLD}║  AI Commander Installed              ║${RESET}"
+  echo -e "${YELLOW}${BOLD}╠══════════════════════════════════════╣${RESET}"
+  echo -e "${YELLOW}${BOLD}║  Session code not yet available      ║${RESET}"
+  echo -e "${YELLOW}${BOLD}╚══════════════════════════════════════╝${RESET}"
+  echo ""
+  warn "The session code did not appear within 15 seconds."
+  echo "  The service is running — the code will appear soon."
+  echo "  Check state file:  cat ${STATE_FILE}"
+  echo "  Or watch logs:     journalctl -u ${SERVICE_NAME} -f"
+  echo "  Service status:    systemctl status ${SERVICE_NAME}"
+  echo ""
+  echo "  Once the code appears, use it in Claude:"
+  echo "    'execute df -h on <session-code>'"
+fi
+
+echo ""
