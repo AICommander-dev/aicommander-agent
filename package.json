@@ -1,0 +1,37 @@
+{
+  "name": "aicommander-agent-mirror",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "build": "pnpm --filter @aicommander/protocol build && pnpm --filter @aicommander/priv-helper build && pnpm --filter @aicommander/agent build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  },
+  "pnpm": {
+    "overrides": {
+      "tar": "7.5.22",
+      "esbuild": "0.28.1",
+      "ws@>=8.0.0 <8.21.0": ">=8.21.0",
+      "undici@<7.29.1": ">=7.29.1 <8.0.0",
+      "nanoid@<3.3.18": ">=3.3.18 <4.0.0",
+      "@xmldom/xmldom@<0.8.15": ">=0.8.15 <0.9.0",
+      "fast-uri@<3.1.8": ">=3.1.8 <4.0.0",
+      "qs@<6.16.0": ">=6.16.0 <7.0.0",
+      "hono@<4.13.7": ">=4.13.7 <5.0.0",
+      "sharp@<0.35.5": ">=0.35.5 <0.36.0",
+      "js-yaml@<4.3.2": ">=4.3.2 <5.0.0",
+      "ip-address@<10.7.1": ">=10.7.1 <11.0.0",
+      "http-cache-semantics@<4.3.0": ">=4.3.0 <5.0.0",
+      "proxy-addr@<2.0.8": ">=2.0.8 <3.0.0",
+      "source-map-js@<1.2.2": ">=1.2.2 <2.0.0",
+      "@modelcontextprotocol/sdk@<1.31.0": ">=1.31.0 <2.0.0",
+      "brace-expansion@1": "1.1.21",
+      "brace-expansion@2": "2.1.7",
+      "brace-expansion@5": "5.0.12"
+    }
+  }
+}
