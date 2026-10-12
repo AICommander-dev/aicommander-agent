@@ -1,0 +1,52 @@
+THIRD-PARTY NOTICES — @aicommander/agent
+========================================
+
+This package is licensed under the Elastic License 2.0 (see LICENSE.txt). The
+published bundles `dist/index.js` and `dist/bin/agent.js` are produced by
+esbuild, which INLINES the sources of two workspace packages into them, so a
+copy of this tarball is also a copy of their code:
+
+  @aicommander/protocol    MIT           notice reproduced in full below
+  @aicommander/priv-helper Elastic-2.0   same terms as this package (LICENSE.txt)
+
+esbuild keeps the originating path as a comment above each inlined section
+(`// ../protocol/src/...`), so which lines come from where is readable in the
+shipped bundle itself.
+
+No third-party source is compiled into those bundles. The runtime dependencies
+(chalk, commander, ora, ws) are deliberately NOT bundled — npm installs them as
+separate packages under their own terms and with their own license files.
+
+The tarball also ships one prebuilt binary,
+`dist-native/aicommander-win-exec-x64.exe`, built from this package's own C++
+source at `packages/agent/native/win-exec-launcher/`. Its project file sets
+`<RuntimeLibrary>MultiThreaded</RuntimeLibrary>`, so Microsoft's C runtime is
+linked STATICALLY into that executable rather than loaded from the system. That
+code is Microsoft's and is redistributed under Microsoft's terms; no text for it
+is reproduced here.
+
+----------------------------------------------------------------------
+@aicommander/protocol — MIT License
+----------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2026 2Dynamic Games sp. z o.o.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

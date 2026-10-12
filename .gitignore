@@ -1,0 +1,17 @@
+node_modules/
+dist/
+dist-bin/
+dist-sea/
+dist-bundle/
+.turbo/
+.node-cache/
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
+
+# NOTE: dist-native/ is deliberately NOT ignored. The mirror carries the
+# Azure-Trusted-Signing-signed Windows launcher
+# (packages/agent/dist-native/aicommander-win-exec-x64.exe + .sha256) as a
+# committed artifact, because the signing secrets stay in the private repo and
+# never reach this one. See README.md.
